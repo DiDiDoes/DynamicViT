@@ -15,16 +15,18 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 from torch.nn import parameter
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
-from losses import DistillationLoss, DiffPruningLoss, DistillDiffPruningLoss
+from losses import DistillationLoss, DiffPruningLoss, DistillDiffPruningLoss, WrapperLoss
 from samplers import RASampler
 import utils
 from functools import partial
 import torch.nn as nn
 from vit import VisionTransformerDiffPruning, VisionTransformerTeacher, _cfg, checkpoint_filter_fn
 from lvvit import LVViTDiffPruning, LVViT_Teacher
+from soft_assign import TokenReduceViT
 import math
 import shutil
 
@@ -222,6 +224,11 @@ def main(args):
         raise NotImplementedError("Finetuning with distillation not yet supported")
 
     device = torch.device(args.device)
+    if utils.is_main_process():
+        writer = SummaryWriter()
+    else:
+        writer = None
+    counter = 0
 
     # fix the seed for reproducibility
     seed = args.seed + utils.get_rank()
@@ -364,6 +371,22 @@ def main(args):
             model_t.load_state_dict(checkpoint, strict=True)
             model_t.to(device)
             print('sucessfully loaded from pre-trained weights for the teach model')
+    elif args.arch == "soft":
+        PRUNING_LOC = [3,6,9] 
+        print(f"Creating model: {args.arch}")
+        print('token_ratio =', KEEP_RATE, 'at layer', PRUNING_LOC)
+        model = TokenReduceViT(
+            patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True, 
+            # pruning_loc=PRUNING_LOC, token_ratio=KEEP_RATE, distill=args.distill
+            )
+        model_path = './deit_small_patch16_224-cd65a155.pth'
+        checkpoint = torch.load(model_path, map_location="cpu")
+        ckpt = checkpoint_filter_fn(checkpoint, model)
+        model.default_cfg = _cfg()
+        missing_keys, unexpected_keys = model.load_state_dict(ckpt, strict=False)
+        print('# missing keys=', missing_keys)
+        print('# unexpected keys=', unexpected_keys)
+        print('sucessfully loaded from pre-trained weights:', model_path)
     else:
         raise NotImplementedError
 
@@ -466,9 +489,14 @@ def main(args):
                 model_t, criterion, clf_weight=1.0, keep_ratio=KEEP_RATE, mse_token=True, ratio_weight=args.ratiow, distill_weight=args.distillw
             )
     else:
-        criterion = DiffPruningLoss(
-            criterion, clf_weight=1.0, keep_ratio=KEEP_RATE
-        )
+        if "soft" in args.arch:
+            criterion = WrapperLoss(
+                criterion, clf_weight=1.0, keep_ratio=KEEP_RATE
+            )
+        else:
+            criterion = DiffPruningLoss(
+                criterion, clf_weight=1.0, keep_ratio=KEEP_RATE
+            )
 
     output_dir = Path(args.output_dir)
     if args.resume:
@@ -506,8 +534,10 @@ def main(args):
             model, criterion, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             args.clip_grad, model_ema, mixup_fn,
-            set_training_mode=args.finetune == '' # keep in eval mode during finetuning
+            set_training_mode=args.finetune == '', # keep in eval mode during finetuning
+            writer=writer, counter=counter
         )
+        counter += len(data_loader_train)
 
         # lr_scheduler.step(epoch)
         if args.output_dir:

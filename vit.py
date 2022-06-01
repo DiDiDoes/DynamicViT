@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from utils import batch_index_select
+from utils import is_main_process, batch_index_select
 
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
@@ -395,6 +395,7 @@ class VisionTransformerDiffPruning(nn.Module):
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
 
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -429,12 +430,16 @@ class VisionTransformerDiffPruning(nn.Module):
         init_n = 14 * 14
         prev_decision = torch.ones(B, init_n, 1, dtype=x.dtype, device=x.device)
         policy = torch.ones(B, init_n + 1, 1, dtype=x.dtype, device=x.device)
+        pred_scores = []
+        num_tokens = []
         for i, blk in enumerate(self.blocks):
             if i in self.pruning_loc:
                 spatial_x = x[:, 1:]
                 pred_score = self.score_predictor[p_count](spatial_x, prev_decision).reshape(B, -1, 2)
+                pred_scores.append(pred_score)
                 if self.training:
                     hard_keep_decision = F.gumbel_softmax(pred_score, hard=True)[:, :, 0:1] * prev_decision
+                    num_tokens.append(torch.mean(torch.sum(hard_keep_decision, dim=1)))
                     out_pred_prob.append(hard_keep_decision.reshape(B, init_n))
                     cls_policy = torch.ones(B, 1, 1, dtype=hard_keep_decision.dtype, device=hard_keep_decision.device)
                     policy = torch.cat([cls_policy, hard_keep_decision], dim=1)
@@ -455,6 +460,7 @@ class VisionTransformerDiffPruning(nn.Module):
                     x = blk(x, policy)
                 else:
                     x = blk(x)
+            # print(x.shape)
 
         x = self.norm(x)
         features = x[:, 1:]
@@ -463,7 +469,7 @@ class VisionTransformerDiffPruning(nn.Module):
         x = self.head(x)
         if self.training:
             if self.distill:
-                return x, features, prev_decision.detach(), out_pred_prob
+                return x, features, prev_decision.detach(), out_pred_prob, pred_scores, num_tokens
             else:
                 return x, out_pred_prob
         else:

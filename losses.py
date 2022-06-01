@@ -169,7 +169,7 @@ class DistillDiffPruningLoss(torch.nn.Module):
             labels: the labels for the base criterion
         """
 
-        pred, token_pred, mask, out_pred_score = outputs
+        pred, token_pred, mask, out_pred_score, _, _ = outputs
 
         pred_loss = 0.0
 
@@ -234,3 +234,32 @@ class DistillDiffPruningLoss(torch.nn.Module):
                 self.token_distill_loss = 0
         return loss
 
+class WrapperLoss(torch.nn.Module):
+    def __init__(self, base_criterion: torch.nn.Module, dynamic=False, ratio_weight=2.0, pruning_loc=[3,6,9], keep_ratio=[0.75, 0.5, 0.25], clf_weight=0, print_mode=True):
+        super().__init__()
+        self.base_criterion = base_criterion
+        self.clf_weight = clf_weight
+        self.pruning_loc = pruning_loc
+        self.keep_ratio = keep_ratio
+        self.count = 0
+        self.print_mode = print_mode
+        self.cls_loss = 0
+        self.ratio_loss = 0
+
+        self.ratio_weight = ratio_weight
+
+        self.dynamic = dynamic
+
+        if self.dynamic:
+            print('using dynamic loss')
+
+    def forward(self, inputs, outputs, labels):
+        cls_loss = self.base_criterion(outputs, labels)
+        if self.print_mode:
+            self.cls_loss += cls_loss.item()
+            self.count += 1
+            if self.count == 100:
+                print('loss info: cls_loss=%.4f' % (self.cls_loss / 100))
+                self.count = 0
+                self.cls_loss = 0
+        return cls_loss

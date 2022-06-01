@@ -16,12 +16,11 @@ import utils
 
 import random
 
-
 def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True):
+                    set_training_mode=True, writer=None, counter=None):
     model.train(set_training_mode)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -35,9 +34,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
-        with torch.cuda.amp.autocast():
-            outputs = model(samples)
-            loss = criterion(samples, outputs, targets)
+        # with torch.cuda.amp.autocast():
+        outputs = model(samples)
+        loss = criterion(samples, outputs, targets)
+        #acc1, acc5 = accuracy(outputs[0], targets, topk=(1, 5))
+        counter += 1
+        # if utils.is_main_process() and counter % 1000 == 0:
+        #     for i, score in enumerate(outputs[4]):
+        #         writer.add_histogram(f"pred_score_keep_{i}", score[:,:,0].flatten(), int(counter // 1000))
+        #         writer.add_histogram(f"pred_score_discard_{i}", score[:,:,1].flatten(), int(counter // 1000))
+        #     for i, num in enumerate(outputs[5]):
+        #         writer.add_scalar(f"num_token_{i}", num, int(counter // 1000))
 
         loss_value = loss.item()
 
@@ -58,6 +65,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+        # batch_size = images.shape[0]
+        #metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+        #metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
